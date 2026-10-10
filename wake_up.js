@@ -685,6 +685,9 @@ ${historyText}
       } else {
         // 时间线里仍记成一条：她一句一句收的，回头翻的时候该是一件事。
         eventContent = `（${getLocalTimeString()} 我按了你的手机：${PUSH_TITLE}｜${delivered.join(" ／ ")}）`;
+        // 批注 2026-10-10（她 12:26 问「没有写日志，那小鱼是不是不知道自己写了什么」）：
+        // 她问得对。开口的这趟也要在日记里留一行——她翻得到，它下一趟醒也认得出自己上一趟的手印。
+        appendDiaryEntry(`${getLocalTimeString()} 我按了你的手机，说了：${delivered.join(" ／ ")}`);
       }
     }
   }
