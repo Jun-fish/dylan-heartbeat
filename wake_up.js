@@ -681,6 +681,9 @@ ${historyText}
 
       if (delivered.length === 0) {
         console.log("\n推送失败，本次不发送推送\n");
+        // 批注 2026-10-10（她 12:38 问「这个版本是小鱼醒一次就会写日记吗」）：
+        // 敲不到她这一趟也算醒过，日记里得有这一行，不然她翻到的那天会缺一块。
+        appendDiaryEntry(`${getLocalTimeString()} 想敲你，没敲到。（${failureReason}）`);
         eventContent = `（${getLocalTimeString()} 想敲你，没敲到。（${failureReason}））`;
       } else {
         // 时间线里仍记成一条：她一句一句收的，回头翻的时候该是一件事。
