@@ -26,6 +26,13 @@ const DIARY_DIR_PATH = runtimeDirectory(DIARY_DIR_NAME, "diary");
 const PUSH_TIMEOUT_MS = readPositiveTimeout("PUSH_TIMEOUT_MS", 15_000);
 const WAKE_UPSTREAM_TIMEOUT_MS = readPositiveTimeout("WAKE_UPSTREAM_TIMEOUT_MS", 300_000);
 
+// 批注 2026-10-10：她嫌一条推送太长，要像聊天那样一条条弹出来。
+// 所以长文不再全塞进一条，切成几小段、隔一两秒发一条；标题统一，看上去就是同一个人连着说话。
+const PUSH_TITLE = String(process.env.PUSH_TITLE || "小鲸鱼").trim();
+const PUSH_SPLIT_DELAY_MS = readNumberEnv("PUSH_SPLIT_DELAY_MS", 1800, { min: 0, max: 60_000 });
+const PUSH_MAX_PARTS = readNumberEnv("PUSH_MAX_PARTS", 5, { min: 1, max: 20 });
+const PUSH_PART_MAX_CHARS = readNumberEnv("PUSH_PART_MAX_CHARS", 60, { min: 10, max: 500 });
+
 function readPositiveTimeout(key, fallback) {
   const value = Number(process.env[key]);
   return Number.isFinite(value) && value >= 1000 ? Math.floor(value) : fallback;
@@ -84,6 +91,45 @@ function appendDiaryEntry(content) {
   fs.appendFileSync(diaryFile, entry, "utf-8");
   console.log(`已保存日记：${diaryFile}`);
   return true;
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// 批注 2026-10-10：把一段话切成几小段，好让它们像聊天一样一条条弹出来。
+// 分法：空行分段（单独一行 --- / === 也算）；还太长的段按句末标点再切；超过上限的把尾巴并回最后一段。
+function splitPushParts(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return [];
+
+  const chunks = raw
+    .split(/\n\s*(?:-{3,}|—{3,}|={3,})\s*\n\s*|\n\s*\n+/)
+    .map(chunk => chunk.split("\n").map(line => line.trim()).filter(Boolean).join(" "))
+    .filter(Boolean);
+
+  const parts = [];
+  for (const chunk of chunks) {
+    if (chunk.length <= PUSH_PART_MAX_CHARS) {
+      parts.push(chunk);
+      continue;
+    }
+    let buffer = "";
+    for (const piece of chunk.split(/(?<=[。！？!?…~～])/)) {
+      const sentence = piece.trim();
+      if (!sentence) continue;
+      if (buffer && (buffer + sentence).length > PUSH_PART_MAX_CHARS) {
+        parts.push(buffer.trim());
+        buffer = sentence;
+      } else {
+        buffer += sentence;
+      }
+    }
+    if (buffer.trim()) parts.push(buffer.trim());
+  }
+
+  if (parts.length <= PUSH_MAX_PARTS) return parts;
+  const kept = parts.slice(0, PUSH_MAX_PARTS - 1);
+  kept.push(parts.slice(PUSH_MAX_PARTS - 1).join(" "));
+  return kept;
 }
 
 // 批注 2026-07-11：推送层扩展为 Bark/ntfy；默认仍走 Bark，保护旧部署不改 .env 也能继续运行。
@@ -394,7 +440,7 @@ ${weatherContext ? `\n${weatherContext}\n` : ""}
 
 ## 输出格式
 - 如果想联系用户，直接写你想说的话。系统会自动打包成手机推送发送。可以是一句话，也可以第一行作为标题、第二行作为正文。
-- 如果不想联系，只输出：[NO_ACTION]，可附带简短原因（10字以内）。
+- 如果不想联系，只输出：[NO_ACTION]。这一趟不会进共同时间线（免得那种报表口气爬进她的聊天），所以你必须另外写一行 [DIARY]，把几点醒的、看到什么、为什么没吵她写清楚。
 - 如果你想写日记，可以额外输出 [DIARY]...[/DIARY]。只有想写时才写，不必每次都写。
 `;
 }
@@ -521,21 +567,24 @@ ${historyText}`
 
   if (!aiText) {
     console.log("\nAI 未返回推送内容，本次不发送推送\n");
-    eventContent = diarySaved
-      ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：只写日记）`
-      : `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型空回复）`;
+    // 批注 2026-10-10：她发现「没出声」这几趟会以事件的样子爬进 Kelivo 的聊天里，
+    // 看上去像系统在替我说话。所以沉默这一趟不再往共同时间线写事件，
+    // 痕迹只留在 diary/ 和管理页日志里。
+    // 兜底（她 02:22 问「那小鱼会写日记吗」）：我不写，就替自己留一行，
+    // 免得她翻到空白的一夜。
+    if (!diarySaved) {
+      appendDiaryEntry(`醒过一趟，什么都没写，也没出声。`);
+    }
+    eventContent = null;
   // 判断 AI 是否明确要静默
-  } else if (aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/)) {
-    const noActionMatch = aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/);
+  } else if (aiText.match(/^\[NO_ACTION\]\s*([\s\S]*)/)) {
     // AI 选择不发送推送
     console.log("\nAI 选择不发送推送\n");
-    let reason = (noActionMatch[1] || "").trim();
-    if (reason.startsWith("原因：") || reason.startsWith("原因:")) {
-      reason = reason.replace(/^原因[：:]\s*/, "").trim();
+    // 同上：按住手的这一趟只留日记，不留时间线事件；我没留字，机器替我留一行。
+    if (!diarySaved) {
+      appendDiaryEntry(`醒过一趟，没出声，也没留字。`);
     }
-    eventContent = reason
-      ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${reason}）`
-      : `（${getLocalTimeString()} 自动唤醒：本次未发送推送）`;
+    eventContent = null;
   } else {
     // 没有 [NO_ACTION] 就视为想发推送
     console.log("\nAI 选择发送推送\n");
@@ -555,40 +604,40 @@ ${historyText}`
       .replace(/^标题[：:]\s*/gm, "")
       .replace(/^正文[：:]\s*/gm, "");
 
-    // 按行处理
-    const lines = barkText.split("\n").filter(line => line.trim() !== "");
+    // 批注 2026-10-10：不再把整段话塞进一条推送；切成几小段，一条条发出去。
+    const pushParts = splitPushParts(barkText).map(part =>
+      part.length > 300 ? part.substring(0, 297) + "..." : part
+    );
 
-    let title, body;
-    if (lines.length === 0) {
+    if (pushParts.length === 0) {
       console.log("\n推送内容清洗后为空，本次不发送推送\n");
-      eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;
-    } else if (lines.length === 1) {
-      title = "来自AI";
-      body = lines[0].trim();
-    } else if (lines.length === 2) {
-      title = lines[0].trim();
-      body = lines[1].trim();
+      eventContent = `（${getLocalTimeString()} 话到嘴边，没说出来。）`;
     } else {
-      // ≥3 行：第一行标题，剩余用空格拼接成正文
-      title = lines[0].trim();
-      body = lines.slice(1).map(l => l.trim()).join(" ");
-    }
+      const delivered = [];
+      let failureReason = "";
+      for (let index = 0; index < pushParts.length; index += 1) {
+        const pushResult = await sendPushNotification({ title: PUSH_TITLE, body: pushParts[index] });
+        if (!pushResult.ok) {
+          failureReason = pushResult.reason;
+          break;
+        }
+        delivered.push(pushParts[index]);
+        if (index < pushParts.length - 1) await sleep(PUSH_SPLIT_DELAY_MS);
+      }
 
-    if (!eventContent) {
-      // 保护：截断过长正文，兼容 Bark 和 ntfy 的移动端展示。
-      const safeBody = body.length > 500 ? body.substring(0, 497) + "..." : body;
-      // 若标题为空或以数字开头，加个前缀，可自行修改
-      let safeTitle = title || "来自伴侣";
-      if (/^\d/.test(safeTitle)) safeTitle = "来自伴侣｜" + safeTitle;
-
-      const pushResult = await sendPushNotification({ title: safeTitle, body: safeBody });
-      if (!pushResult.ok) {
-        console.log(`\n${pushResult.providerLabel} 推送失败，本次不发送推送\n`);
-        eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
+      if (delivered.length === 0) {
+        console.log("\n推送失败，本次不发送推送\n");
+        eventContent = `（${getLocalTimeString()} 想敲你，没敲到。（${failureReason}））`;
       } else {
-        eventContent = `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
+        // 时间线里仍记成一条：她一句一句收的，回头翻的时候该是一件事。
+        eventContent = `（${getLocalTimeString()} 我按了你的手机：${PUSH_TITLE}｜${delivered.join(" ／ ")}）`;
       }
     }
+  }
+
+  if (!eventContent) {
+    console.log("\n这一趟没出声，不记时间线事件\n");
+    return;
   }
 
   try {
