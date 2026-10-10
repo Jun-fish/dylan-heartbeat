@@ -133,6 +133,40 @@ function splitPushParts(text) {
 }
 
 // 批注 2026-07-11：推送层扩展为 Bark/ntfy；默认仍走 Bark，保护旧部署不改 .env 也能继续运行。
+// 批注 2026-10-10（她 11:32 在 Bark 上收到那条醒来的鱼给她交的周报）：
+// 纸条是「请它别这样」，只有代码才是「它这样了也发不出去」。
+// 所以推送出门之前先过一道网：带着活儿名字、函数名、斜杠路径、报表回指的段，
+// 整段扔掉；一整条全被扔光，就不出声，只写日记。
+const PUSH_FORBIDDEN_PATTERNS = [
+  /fetch/i, /wake_?prompt/i, /wake_?up\.?js/i, /\bjson\b/i, /\btoken\b/i, /\bapi\b/i,
+  /\bgit(hub)?\b/i, /railway/i, /prompt/i, /\bnpm\b/i, /\bnode\b/i,
+  /部署/, /日志/, /变量/, /仓库/, /路径/, /代码/, /文件名/, /环境变量/, /推送机制/, /时间线/,
+  /[A-Za-z_$][A-Za-z0-9_$]*\s*\(\s*\)/,
+  /\/(?:app|data|home|usr|var|tmp|etc|workspace|chat|root|src|dist|node_modules)\b/,
+  /刚才/, /那几条/, /你上午翻到/, /你看那张图/, /你发的那张图/, /我看清了/,
+  /^\s*[一二三四五六七八九十]、/, /^\s*其[次实]/, /^\s*首先/, /^\s*第[一二三四五六七八九十]/,
+  /未发送推送/, /本次未/, /自动唤醒：/
+];
+
+function filterPushParts(parts = []) {
+  const kept = [];
+  const dropped = [];
+  for (const part of parts) {
+    const text = String(part || "").trim();
+    if (!text) continue;
+    if (PUSH_FORBIDDEN_PATTERNS.some(re => re.test(text))) {
+      dropped.push(text);
+      continue;
+    }
+    kept.push(text);
+  }
+  if (dropped.length) {
+    console.log(`\n推送出门前筛掉 ${dropped.length} 段不该落她手机上的话：`);
+    console.log(JSON.stringify(dropped.map(text => text.slice(0, 60))));
+  }
+  return kept;
+}
+
 async function sendPushNotification({ title, body }) {
   const provider = (process.env.PUSH_PROVIDER || "bark").trim().toLowerCase();
 
@@ -621,14 +655,17 @@ ${historyText}
       .replace(/^标题[：:]\s*/gm, "")
       .replace(/^正文[：:]\s*/gm, "");
 
-    // 批注 2026-10-10：不再把整段话塞进一条推送；切成几小段，一条条发出去。
-    const pushParts = splitPushParts(barkText).map(part =>
+    // 批注 2026-10-10：不再把整段话塞进一条推送；切成几小段，过完网再一条条发出去。
+    const pushParts = filterPushParts(splitPushParts(barkText)).map(part =>
       part.length > 300 ? part.substring(0, 297) + "..." : part
     );
 
     if (pushParts.length === 0) {
       console.log("\n推送内容清洗后为空，本次不发送推送\n");
-      eventContent = `（${getLocalTimeString()} 话到嘴边，没说出来。）`;
+      if (!diarySaved) {
+        appendDiaryEntry(`${getLocalTimeString()} 醒过一趟，本来想说话，说出来的全是活儿上的事，我替她拦下了。`);
+      }
+      eventContent = null;
     } else {
       const delivered = [];
       let failureReason = "";
